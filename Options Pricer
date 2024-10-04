@@ -229,7 +229,7 @@ class params:
 
 
 class MC : 
-    def option_price(s, k, r, t, sigma, option_type="CALL", barrier="NO", simulations=100000):
+    def option_price(s, k, r, t, sigma, option_type="CALL", simulations=100000):
         """
         Simulates the price of a European option via Monte Carlo.
     
