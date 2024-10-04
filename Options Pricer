@@ -1,0 +1,274 @@
+import pandas as pd
+import numpy as np 
+from scipy.stats import norm
+
+
+class BS:
+    def option_price(s, k, r, t, sigma, option_type="CALL"):
+        """
+        
+
+        Parameters
+        ----------
+        s : TYPE float 
+            DESCRIPTION. Current price of the underlying asset 
+        k : TYPE Dataframe, Series or float 
+            DESCRIPTION. Strike price of the option, can be a scalar or pandas DataFrame/Series
+        r : TYPE float 
+            DESCRIPTION. Risk free interest rate 
+        t : TYPE float 
+            DESCRIPTION. Time to expiry if the option, in years 
+        sigma : TYPE float
+            DESCRIPTION. Volatility of the asset
+        option_type : TYPE str (optional)
+            DESCRIPTION. Type of the option (call or put), defaults to call 
+
+        Returns
+        -------
+        Dataframe, Series or float : The Black & Scholes option price, same type as kw
+
+        """
+        
+        N = norm.cdf
+        d1 = (np.log(s / k) + (r + 0.5 * sigma**2) * t) / (sigma * np.sqrt(t))
+        d2 = d1 - sigma * np.sqrt(t)
+        
+        if option_type.upper() == "CALL":
+            fact = 1
+            
+        elif option_type.upper() == "PUT":
+            fact = - 1
+            
+        else:
+            raise ValueError("Invalid option type. Please use 'call' or 'put'.")
+        
+        price = fact * (s * N(fact * d1)) - fact * (k * np.exp(-r * t) * N(fact * d2))
+        
+            
+        return price 
+    
+    
+    def greeks(s, k, r, t, sigma, greek, option_type="CALL"):
+        """
+        
+
+        Parameters
+        ----------
+        s : TYPE float 
+            DESCRIPTION. Current price of the underlying asset 
+        k : TYPE float 
+            DESCRIPTION. Strike price of the option 
+        r : TYPE float 
+            DESCRIPTION. Risk free interest rate 
+        t : TYPE float 
+            DESCRIPTION. Time to expiry if the option, in years 
+        sigma : TYPE float
+            DESCRIPTION. Volatility of the asset
+        greek; TYPE str
+            DESCRIPTION. greek letter to calculate 
+        option_type : TYPE str, optional 
+            DESCRIPTION. Type of the option (call or put), defaults to call 
+
+        Returns
+        -------
+        float : The chosen greek parameter
+
+        """
+        
+        N = norm.cdf
+        d1 = (np.log(s / k) + (r + 0.5 * sigma**2) * t) / (sigma * np.sqrt(t))
+        d2 = d1 - sigma * np.sqrt(t)
+        
+        if option_type.upper() == "CALL":
+            
+            
+            if greek.upper() == "DELTA":
+                greek_value = N(d1)
+                
+            elif greek.upper() == "GAMMA":
+                greek_value = norm.pdf(d1) / (s * sigma * np.sqrt(t))
+                
+            elif greek.upper() == "VEGA":
+                greek_value = s * norm.pdf(d1) * np.sqrt(t)
+                
+            elif greek.upper() == "THETA":
+                greek_value = -((s * norm.pdf(d1) * sigma) / (2 * np.sqrt(t))) - r * k * np.exp(-r * t) * N(d2)
+                
+            elif greek.upper() == "RHO":
+                greek_value = k * t * np.exp(-r * t) * N(d2)
+            
+            else: 
+                raise ValueError("Invalid Greek")
+                
+            
+        elif option_type.upper() == "PUT":
+            if greek.upper() == "DELTA":
+                greek_value = N(d1) - 1 
+                
+            elif greek.upper() == "GAMMA":
+                greek_value = norm.pdf(d1) / (s * sigma * np.sqrt(t))
+                
+            elif greek.upper() == "VEGA":
+                greek_value = s * norm.pdf(d1) * np.sqrt(t)
+                
+            elif greek.upper() == "THETA":
+                greek_value = -((s * norm.pdf(d1) * sigma) / (2 * np.sqrt(t))) + r * k * np.exp(-r * t) * N(-d2)
+                
+            elif greek.upper() == "RHO":
+                greek_value = -k * t * np.exp(-r * t) * N(-d2)
+            
+            else: 
+                raise ValueError("Invalid Greek")
+            
+        else:
+            raise ValueError("Invalid option type. Please use 'call' or 'put'.")
+            
+            
+        return greek_value
+    
+    
+    
+class params:
+    def set_strikes(data):
+        """
+        Creates a strikes range going from 0% to 200% of the spot price
+
+        Parameters:
+        ----------
+        data : TYPE DataFrame
+            Stock prices data
+
+        Returns:
+        -------
+        DataFrame : containing the strikes going from 0% to 200% of the spot price
+        """
+        strikes = pd.DataFrame()
+        
+        # Dernier prix enregistré (cours de référence)
+        last_price = data.iloc[-1, :]
+        
+        # Générer une liste de pourcentages allant de 0% à 200%
+        percentage_range = np.linspace(0, 2, 201)  # Divisé en 201 points entre 0 et 200%   
+
+        for percentage in percentage_range:
+            strike_price = last_price * percentage  # strike = prix actuel * (pourcentage)
+            strikes = pd.concat([strikes, strike_price.to_frame().T], axis=0)
+        
+        # Renommer l'index de -100% à +100% (ex. : [-100%, -99%, ..., 0%, ..., 100%])
+        strikes.index = [f'{int((percentage - 1) * 100)}%' for percentage in percentage_range]
+        
+        return strikes
+    
+    
+    def set_maturities(time_to_maturity, frequency = "1m"):
+        """
+        Generates a DataFrame containing time steps from today to the desired maturity (in years) 
+        with the desired frequency
+
+        Parameters:
+        ----------
+        time_to_maturity (years) : TYPE float
+            Desired time to maturity for the DataFrame
+        
+        frequency : TYPE str
+            Desired time step for the DataFrame, monthly by default 
+                Valeurs possibles :
+                - "1d" : daily
+                - "1w" : weekly
+                - "2w" : biweekly
+                - "1m" : monthly
+                - "1q" : quarterly
+                - "1s" : buannual
+                - "1y" : annual
+
+        Returns:
+        -------
+        maturities : DataFrame
+            DataFrame containing all the desired time steps from today to the maturity
+        """
+        maturities = pd.DataFrame()
+        
+        if frequency == "1d":
+            f = 365
+            périodes = "jours"
+            
+        elif frequency == "1w":
+            f = 52
+            périodes = "semaines"
+        
+        elif frequency == "1m":
+            f = 12
+            périodes = "mois"
+        
+        elif frequency == "1q":
+            f = 3
+            périodes = "trimestres"
+        
+        elif frequency == "1s":
+            f = 2
+            périodes = "semestres"
+        
+        elif frequency == "1y":
+            f = 1
+            périodes = "années"
+        
+        else:
+            raise ValueError("Fréquence non reconnue. Veuillez utiliser l'une des valeurs suivantes : '1d', '1w'', '1m', '1q', '1s', '1y'.")
+        
+        times_to_maturity = np.linspace(0, time_to_maturity, int(f * time_to_maturity) + 1)   
+     
+        #Ajouter la série à un dataframe   
+        maturities = pd.DataFrame(times_to_maturity, columns=['Maturities'])
+        
+        # Renommer les index avec les unités de temps appropriées
+        maturities.index = [f"{i} {périodes}" for i in range(len(maturities))]
+        
+        return maturities
+
+
+
+
+class MC : 
+    def option_price(s, k, r, t, sigma, option_type="CALL", barrier="NO", simulations=100000):
+        """
+        Simulates the price of a European option via Monte Carlo.
+    
+        Parameters
+        ----------
+        s : float
+            The current price of the underlying asset.
+        k : float
+            The strike price of the option.
+        r : float
+            The risk-free interest rate.
+        t : float
+            The time to maturity (in years).
+        sigma : float
+            The volatility of the underlying asset.
+        option_type : str, optional
+            The type of the option ('call' or 'put'), default is 'call'.
+        simulations : int, optional
+            The number of Monte Carlo simulations to perform, default is 10,000.
+    
+        Returns
+        -------
+        option_price : float
+            The option price estimated using Monte Carlo simulation.
+        """
+        
+        # Generate simulations for the underlying asset's final price
+        z = np.random.standard_normal(simulations)
+        st = s * np.exp((r - 0.5 * sigma**2) * t + sigma * np.sqrt(t) * z)
+        
+        # Calculate payoffs based on the option type
+        if option_type.upper() == "CALL":
+            payoffs = np.maximum(st - k, 0)
+        elif option_type.upper() == "PUT":
+            payoffs = np.maximum(k - st, 0)
+        else:
+            raise ValueError("Invalid option type. Use 'call' or 'put'.")
+        
+        # Calculate the average of discounted payoffs
+        option_price = np.exp(-r * t) * np.mean(payoffs)
+        
+        return option_price
