@@ -159,6 +159,35 @@ class params:
         
         return strikes
     
+    def set_spots(data, strike):
+        """
+        Creates a spots range going from 0% to 200% of the strike price.
+    
+        Parameters:
+        ----------
+        data : TYPE DataFrame
+            Stock prices data.
+    
+        strike : TYPE float
+            The strike price of the option.
+    
+        Returns:
+        -------
+        spots : DataFrame
+            DataFrame containing the spot prices ranging from 0% to 200% of the strike price.
+        """
+        
+        # Generate a list of percentages going from 0% to 200%
+        percentage_range = np.linspace(0, 2, 201)  # Divided into 201 points between 0% and 200%
+        
+        # Create a DataFrame of spot prices based on the strike price
+        spots = pd.DataFrame(percentage_range * strike, columns=['Spot Price'])
+        
+        # Rename the index from -100% to +100% (e.g., [-100%, -99%, ..., 0%, ..., 100%])
+        spots.index = [f'{int((percentage - 1) * 100)}%' for percentage in percentage_range]
+        
+        return spots
+
     
     def set_maturities(time_to_maturity, frequency = "1m"):
         """
@@ -229,7 +258,7 @@ class params:
 
 
 class MC : 
-    def option_price(s, k, r, t, sigma, option_type="CALL", simulations=100000):
+    def option_price(s, k, r, t, sigma, option_type="CALL", barrier="NO", simulations=100000):
         """
         Simulates the price of a European option via Monte Carlo.
     
