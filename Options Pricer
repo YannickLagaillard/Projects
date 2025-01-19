@@ -219,27 +219,27 @@ class params:
         
         if frequency == "1d":
             f = 365
-            périodes = "jours"
+            périodes = "days"
             
         elif frequency == "1w":
             f = 52
-            périodes = "semaines"
+            périodes = "weeks"
         
         elif frequency == "1m":
             f = 12
-            périodes = "mois"
+            périodes = "months"
         
         elif frequency == "1q":
             f = 3
-            périodes = "trimestres"
+            périodes = "quarters"
         
         elif frequency == "1s":
             f = 2
-            périodes = "semestres"
+            périodes = "semesters"
         
         elif frequency == "1y":
             f = 1
-            périodes = "années"
+            périodes = "years"
         
         else:
             raise ValueError("Fréquence non reconnue. Veuillez utiliser l'une des valeurs suivantes : '1d', '1w'', '1m', '1q', '1s', '1y'.")
@@ -253,6 +253,7 @@ class params:
         maturities.index = [f"{i} {périodes}" for i in range(len(maturities))]
         
         return maturities
+    
 
 
 
