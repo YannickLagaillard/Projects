@@ -1,0 +1,169 @@
+import yfinance as yf 
+import pandas as pd
+import numpy as np 
+from scipy.optimize import brentq
+from datetime import datetime
+from my_utilities.options import BS
+
+
+def get_stock_data(tickers, startdate, enddate):
+    """
+    
+
+    Parameters
+    ----------
+    tickers : TYPE list
+        DESCRIPTION. Yahoo finance ticker of the desired asset   
+    startdate : TYPE datetime
+        DESCRIPTION. Date from which asset price data should be retrieved
+    enddate : TYPE datetime 
+        DESCRIPTION. Date to which asset price data should be retrieved
+
+    Returns
+    -------
+    Dataframe : 
+
+    """
+        
+    stock_data = pd.DataFrame()
+    
+    for ticker in tickers:
+        stock = yf.Ticker(ticker)
+        df = stock.history(start = startdate, end = enddate, interval = '1d')
+        
+        if not df.empty :
+            df = df[['Close']]
+            df .index = df.index.to_series().dt.date 
+            df.sort_index(inplace = True)
+            df.columns = [ticker]
+            stock_data = pd.concat([stock_data, df], axis = 1)
+            
+    return stock_data
+
+
+def implied_volatility(ticker, expiration, strike, option_type="CALL"):
+    """
+    Calculates the implied volatility by automatically retrieving option prices from Yahoo Finance.
+
+    Parameters:
+    ----------
+    ticker : str : Yahoo Finance ticker of the underlying asset.
+    expiration : str : Option expiration date in the format 'YYYY-MM-DD'.
+    strike : float : Option's strike price.
+    option_type : str : Option type ('CALL' or 'PUT').
+
+    Returns:
+    -------
+    float : Calculated implied volatility or NaN if data is unavailable.
+    """
+
+    # Retrieve option data
+    asset = yf.Ticker(ticker)
+    
+    # Check if expiration is valid
+    available_expirations = asset.options
+    if not available_expirations:
+        print(f"Error: No expiration dates available for `{ticker}`.")
+        return np.nan
+
+    if expiration not in available_expirations:
+        print(f"Error: Expiration `{expiration}` cannot be found. Available expirations are: {available_expirations}")
+        return np.nan
+
+    try:
+        # Get option chain for the specified expiration
+        options_chain = asset.option_chain(expiration)
+        options = options_chain.calls if option_type.upper() == "CALL" else options_chain.puts
+
+        # Filter to find the price matching the strike
+        option_data = options[options['strike'] == strike]
+        if option_data.empty:
+            print(f"Error: No option found with strike `{strike}` for `{option_type}` options.")
+            return np.nan
+
+        market_price = option_data['lastPrice'].iloc[0]
+    except Exception as e:
+        print(f"Error retrieving data: {e}")
+        return np.nan
+
+    # Internal function for price difference with Black-Scholes
+    def bs_price_diff(sigma):
+        try:
+            return BS.option_price(
+                s=asset.history(period="1d")['Close'].iloc[-1],
+                k=strike,
+                r=0.01,  # Example risk-free rate, adjust as needed
+                t=(pd.to_datetime(expiration) - pd.Timestamp.today()).days / 365.0,
+                sigma=sigma,
+                option_type=option_type
+            ) - market_price
+        except Exception as e:
+            print(f"Error in BS calculation: {e}")
+            return np.nan
+
+    # Solve to find implied volatility
+    try:
+        implied_vol = brentq(bs_price_diff, 1e-4, 5)  # Volatility between 0.01% and 500%
+        return implied_vol
+    except ValueError:
+        print("Error: No solution found for implied volatility.")
+        return np.nan
+    
+def volatility_surface(ticker, max_maturities=None):
+    """
+    Create a volatility surface using CALL options for strikes above the spot price
+    and PUT options for strikes below the spot price, with automatic strike generation.
+
+    Parameters:
+    ----------
+    ticker : str : Yahoo Finance ticker for the underlying asset.
+    max_maturities : int : Maximum number of maturities to include (optional).
+
+    Returns:
+    -------
+    pd.DataFrame : DataFrame containing implied volatilities for each strike and maturity.
+    """
+
+    # Initialize the result DataFrame
+    surface_data = []
+
+    # Retrieve ticker information
+    asset = yf.Ticker(ticker)
+    maturities = asset.options  # Get all available maturities
+
+    # Limit the number of maturities if specified
+    if max_maturities:
+        maturities = maturities[:max_maturities]
+
+    # Get the current spot price
+    spot_price = asset.history(period="1d")['Close'].iloc[-1]
+
+    for maturity in maturities:
+        expiration_date = datetime.strptime(maturity, "%Y-%m-%d")
+        time_to_maturity = (expiration_date - datetime.now()).days / 365.0
+
+        # Retrieve option chain for the given maturity
+        try:
+            options_chain = asset.option_chain(maturity)
+            available_strikes = options_chain.calls['strike'].tolist()  # All strikes available
+        except Exception as e:
+            print(f"Error retrieving data for {maturity}: {e}")
+            continue
+
+        # Calculate IV for each strike
+        for strike in available_strikes:
+            # Determine option type based on strike relative to spot
+            option_type = "CALL" if strike >= spot_price else "PUT"
+            iv = BS.implied_volatility(ticker, maturity, strike, option_type)
+
+            # Store the data
+            surface_data.append({
+                "Maturity": maturity,
+                "Days to Expiry": time_to_maturity,
+                "Strike": strike,
+                "Option Type": option_type,
+                "Implied Volatility": iv
+            })
+
+    # Convert results to a DataFrame
+    return pd.DataFrame(surface_data)
