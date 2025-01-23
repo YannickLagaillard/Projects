@@ -1,0 +1,389 @@
+import yfinance as yf
+import pandas as pd
+import numpy as np 
+from scipy.optimize import brentq
+from datetime import datetime
+from my_utilities.options import BS
+import matplotlib.pyplot as plt
+import plotly.graph_objects as go
+import seaborn as sns
+from scipy.interpolate import griddata
+
+
+
+
+
+def implied_volatility(ticker, expiration, strike, option_type="CALL"):
+    """
+    Calculates the implied volatility by automatically retrieving option prices from Yahoo Finance.
+
+    Parameters:
+    ----------
+    ticker : str : Yahoo Finance ticker of the underlying asset.
+    expiration : str : Option expiration date in the format 'YYYY-MM-DD'.
+    strike : float : Option's strike price.
+    option_type : str : Option type ('CALL' or 'PUT').
+
+    Returns:
+    -------
+    float : Calculated implied volatility or NaN if data is unavailable.
+    """
+
+    # Retrieve option data
+    asset = yf.Ticker(ticker)
+    
+    # Check if expiration is valid
+    available_expirations = asset.options
+    if not available_expirations:
+        print(f"Error: No expiration dates available for `{ticker}`.")
+        return np.nan
+
+    if expiration not in available_expirations:
+        print(f"Error: Expiration `{expiration}` cannot be found. Available expirations are: {available_expirations}")
+        return np.nan
+
+    try:
+        # Get option chain for the specified expiration
+        options_chain = asset.option_chain(expiration)
+        options = options_chain.calls if option_type.upper() == "CALL" else options_chain.puts
+
+        # Filter to find the price matching the strike
+        option_data = options[options['strike'] == strike]
+        if option_data.empty:
+            print(f"Error: No option found with strike `{strike}` for `{option_type}` options.")
+            return np.nan
+
+        market_price = option_data['lastPrice'].iloc[0]
+    except Exception as e:
+        print(f"Error retrieving data: {e}")
+        return np.nan
+
+    # Internal function for price difference with Black-Scholes
+    def bs_price_diff(sigma):
+        try:
+            return BS.option_price(
+                s=asset.history(period="1d")['Close'].iloc[-1],
+                k=strike,
+                r=0.01,  # Example risk-free rate, adjust as needed
+                t=(pd.to_datetime(expiration) - pd.Timestamp.today()).days / 365.0,
+                sigma=sigma,
+                option_type=option_type
+            ) - market_price
+        except Exception as e:
+            print(f"Error in BS calculation: {e}")
+            return np.nan
+
+    # Solve to find implied volatility
+    try:
+        implied_vol = brentq(bs_price_diff, 1e-4, 5)  # Volatility between 0.01% and 500%
+        return implied_vol
+    except ValueError:
+        print("Error: No solution found for implied volatility.")
+        return np.nan
+    
+    
+
+def volatility_surface(ticker, max_maturities=None):
+    """
+    Create a volatility surface using CALL options for strikes above the spot price
+    and PUT options for strikes below the spot price, with uniform strike and date interpolation.
+
+    Parameters:
+    ----------
+    ticker : str
+        Yahoo Finance ticker for the underlying asset.
+    max_maturities : int, optional
+        Maximum number of maturities to include.
+
+    Returns:
+    -------
+    pd.DataFrame
+        DataFrame containing interpolated implied volatilities for a uniform grid.
+    """
+    # Helper function for Black-Scholes IV calculation
+    def implied_volatility_bs(market_price, spot, strike, time_to_maturity, r, option_type):
+        def bs_price_diff(sigma):
+            return BS.option_price(
+                s=spot,
+                k=strike,
+                r=r,
+                t=time_to_maturity,
+                sigma=sigma,
+                option_type=option_type,
+            ) - market_price
+
+        try:
+            return brentq(bs_price_diff, 1e-4, 5)  # Search for IV between 0.01% and 500%
+        except ValueError:
+            return np.nan
+
+    # Initialize the result list
+    surface_data = []
+
+    # Retrieve ticker information
+    asset = yf.Ticker(ticker)
+    maturities = asset.options  # Get all available maturities
+
+    # Limit the number of maturities if specified
+    if max_maturities:
+        maturities = maturities[:max_maturities]
+
+    # Get the current spot price
+    spot_price = asset.history(period="1d")['Close'].iloc[-1]
+
+    for maturity in maturities:
+        expiration_date = datetime.strptime(maturity, "%Y-%m-%d")
+        time_to_maturity = (expiration_date - datetime.now()).days / 365
+
+        # Retrieve the full option chain for the given maturity
+        try:
+            options_chain = asset.option_chain(maturity)
+            calls = options_chain.calls
+            puts = options_chain.puts
+        except Exception as e:
+            print(f"Error retrieving data for {maturity}: {e}")
+            continue
+
+        # Combine calls and puts and filter strikes
+        options = pd.concat([calls.assign(option_type="CALL"), puts.assign(option_type="PUT")])
+
+        for _, option in options.iterrows():
+            strike = option['strike']
+            option_type = option['option_type']
+            market_price = option['lastPrice']
+
+            # Filter options to use calls above spot and puts below spot
+            if (option_type == "CALL" and strike >= spot_price) or (option_type == "PUT" and strike < spot_price):
+                iv = implied_volatility_bs(
+                    market_price=market_price,
+                    spot=spot_price,
+                    strike=strike,
+                    time_to_maturity=time_to_maturity,
+                    r=0.01,  # Example risk-free rate
+                    option_type=option_type,
+                )
+
+                # Store the data
+                surface_data.append({
+                    "Date": expiration_date,
+                    "Maturity": maturity,
+                    "Years to Expiry": time_to_maturity,
+                    "Strike": strike,
+                    "Relative Strike": round((strike-spot_price) / spot_price * 100, 0),
+                    "Option Type": option_type,
+                    "Implied Volatility": iv,
+                })
+
+    # Convert the results to a DataFrame
+    surface_df = pd.DataFrame(surface_data)
+
+    # Interpolation step for relative strikes and dates
+    min_relative_strike = surface_df['Relative Strike'].min()
+    max_relative_strike = surface_df['Relative Strike'].max()
+    relative_strike_grid = np.arange(min_relative_strike, max_relative_strike + 0.5, 0.5)  # Grid with 0.5% steps
+
+    min_date = surface_df['Date'].min()
+    max_date = surface_df['Date'].max()
+    date_grid = pd.date_range(start=min_date, end=max_date, freq="2D")  # Every 2 days
+
+    # Map dates to years to expiry
+    days_to_expiry_grid = (date_grid - datetime.now()).days / 365
+
+    # Create a grid for interpolation
+    grid_x, grid_y = np.meshgrid(relative_strike_grid, days_to_expiry_grid)
+
+    # Filter out NaNs for interpolation
+    valid_data = surface_df.dropna(subset=['Implied Volatility'])
+    points = valid_data[['Relative Strike', 'Years to Expiry']].values
+    values = valid_data['Implied Volatility'].values
+
+    # Interpolate implied volatilities
+    interpolated_vols = griddata(points, values, (grid_x, grid_y), method='linear')
+
+    # Flatten the interpolated grid and construct the final DataFrame
+    interpolated_df = pd.DataFrame({
+        'Date': np.repeat(date_grid, len(relative_strike_grid)),
+        'Relative Strike': grid_x.ravel(),
+        'Years to Expiry': grid_y.ravel(),
+        'Implied Volatility': interpolated_vols.ravel()
+    }).dropna()
+
+    return interpolated_df
+
+
+
+
+
+def plot_volatility_skew(vol_surface_df, maturity, show=True):
+    """
+    Plot the volatility smile for a given maturity.
+    
+    Parameters:
+    ----------
+    vol_surface_df : pd.DataFrame
+        DataFrame containing 'Strike', 'Maturity', and 'Implied Volatility'.
+    maturity : str
+        Maturity date to plot the smile for (format: 'YYYY-MM-DD').
+    show : bool
+        Whether to display the plot directly. Useful for exporting.
+    
+    Returns:
+    -------
+    plt.Figure : Matplotlib figure for further customization.
+    """
+    # Filter data for the given maturity
+    maturity_data = vol_surface_df[vol_surface_df['Date'] == maturity]
+    
+    if maturity_data.empty:
+        print(f"No data available for maturity {maturity}")
+        return None
+
+    # Sort data by strike for better plotting
+    maturity_data = maturity_data.sort_values(by='Relative Strike')
+    
+    # Extract strikes and implied volatilities
+    strikes = maturity_data['Relative Strike']
+    implied_vols = maturity_data['Implied Volatility']
+    
+    # Plot the smile
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.plot(strikes, implied_vols, label=f"Maturity: {maturity}")
+    ax.set_title(f"Volatility Smile for Maturity {maturity}")
+    ax.set_xlabel("Strike Price (% of the Spot Price)")
+    ax.set_ylabel("Implied Volatility")
+    ax.grid(True, linestyle='-', alpha=0.6)
+    ax.legend()
+    
+    if show:
+        plt.show()
+    
+    return fig
+
+
+
+def plot_term_structure(vol_surface_df, relative_strike, spot_price):
+    """
+    Plot the term structure of volatility for a given relative strike.
+    
+    Parameters:
+    ----------
+    vol_surface_df : pd.DataFrame
+        DataFrame containing 'Relative Strike', 'Years to Expiry', 'Implied Volatility'.
+    relative_strike : float
+        The strike as a percentage of the spot price (e.g., 1.05 for 105%).
+    spot_price : float
+        The current spot price of the underlying.
+    """
+    
+    term_data = vol_surface_df[vol_surface_df['Relative Strike'] == relative_strike]
+
+    if term_data.empty:
+        print(f"No data found for relative strike: {relative_strike:.2f}.")
+        return
+
+    plt.figure(figsize=(10, 6))
+    sns.lineplot(
+        x="Years to Expiry",
+        y="Implied Volatility",
+        data=term_data,
+        marker="o",
+        color="b",
+        label=f"Relative Strike: {relative_strike:.2f}"
+    )
+    plt.title(f"Term Structure of Volatility for Strike: {relative_strike:.2f}")
+    plt.xlabel("Years to Expiry")
+    plt.ylabel("Implied Volatility")
+    plt.grid(True, linestyle="--", alpha=0.6)
+    plt.legend()
+    plt.show()
+
+    
+    
+    
+
+def plot_volatility_surface(vol_surface_df):
+    """
+    Plot the volatility surface from a DataFrame.
+    
+    Parameters:
+    ----------
+    vol_surface_df : pd.DataFrame
+        DataFrame containing 'Strike', 'Years to Expiry', and 'Implied Volatility' columns.
+    """
+    # Prepare the data for 3D plotting
+    strikes = vol_surface_df['Relative Strike'].unique()
+    maturities = vol_surface_df['Years to Expiry'].unique()
+    
+    # Create a grid for strikes and maturities
+    X, Y = np.meshgrid(strikes, maturities)
+    Z = np.zeros_like(X, dtype=float)
+    
+    for i, mat in enumerate(maturities):
+        for j, strike in enumerate(strikes):
+            # Filter for the specific maturity and strike
+            iv = vol_surface_df[
+                (vol_surface_df['Relative Strike'] == strike) &
+                (vol_surface_df['Years to Expiry'] == mat)
+            ]['Implied Volatility']
+            
+            Z[i, j] = iv.iloc[0] if not iv.empty else np.nan  # Fill with NaN if no data
+
+    # Plot the surface
+    fig = plt.figure(figsize=(10, 6))
+    ax = fig.add_subplot(111, projection='3d')
+    surf = ax.plot_surface(X, Y, Z, cmap='plasma', edgecolor='k', alpha=0.8)
+
+    # Add labels and title
+    ax.set_xlabel("Strike (% of the Spot Price)")
+    ax.set_ylabel("Years to Expiry")
+    ax.set_zlabel("Implied Volatility")
+    ax.set_title("Volatility Surface")
+    
+    # Adjust the view angle 
+    ax.view_init(elev=30, azim=45) # Cusomize elev and azim for desired orientation
+    
+    # Add a color bar
+    fig.colorbar(surf, shrink=0.5, aspect=10, label="Implied Volatility" )
+
+    plt.show()
+
+
+    
+    
+
+def plot_volatility_surface_interactive(vol_surface_df):
+    """
+    Plot the volatility surface using Plotly and open in a browser.
+    
+    Parameters:
+    ----------
+    vol_surface_df : pd.DataFrame
+        DataFrame containing 'Strike', 'Years to Expiry', and 'Implied Volatility' columns.
+    """
+    import plotly.io as pio
+    pio.renderers.default = "browser"  # Force opening in the default browser
+
+    fig = go.Figure()
+
+    # Add surface data
+    fig.add_trace(go.Surface(
+        z=vol_surface_df.pivot_table(
+            values='Implied Volatility',
+            index='Years to Expiry',
+            columns='Relative Strike'
+        ).values,
+        x=vol_surface_df['Relative Strike'].unique(),
+        y=vol_surface_df['Years to Expiry'].unique(),
+        colorscale='inferno'
+    ))
+
+    fig.update_layout(
+        title="Volatility Surface",
+        scene=dict(
+            xaxis_title="Strike (% of the Spot Price)",
+            yaxis_title="Years to Expiry",
+            zaxis_title="Implied Volatility"
+        )
+    )
+    
+    fig.show()  # This will open the chart in a web browser
